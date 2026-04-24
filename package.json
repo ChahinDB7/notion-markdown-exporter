@@ -1,0 +1,19 @@
+{
+  "name": "notion-exporter",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A tool to export Notion pages to Markdown",
+  "main": "notion-exporter.js",
+  "scripts": {
+    "start": "node notion-exporter.js",
+    "generate-html": "node generate-html.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^4.0.1",
+    "dotenv": "^17.2.1",
+    "escape-html": "^1.0.3",
+    "marked": "^16.1.2",
+    "notion-to-md": "^3.1.9",
+    "sanitize-html": "^2.17.0"
+  }
+}
