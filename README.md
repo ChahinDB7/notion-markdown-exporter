@@ -1,6 +1,6 @@
 # Notion Markdown Exporter (with API)
 
-I built this because I wanted to export my Notion pages to Markdown, and the other projects I tried kept producing Markdown with broken alignment and formatting. This one keeps the structure intact.
+I built this because I wanted to export my Notion pages to Markdown, and the other projects online I tried kept producing Markdown with broken alignment and formatting. This one keeps the structure intact.
 
 ## Setup
 
