@@ -123,6 +123,11 @@ async function getAllPages() {
 async function exportAllPages() {
   const pages = await getAllPages();
 
+  if (pages.length === 0) {
+    console.warn('⚠️  No pages found. Make sure your Notion integration is connected to at least one page. Read the README.md for setup instructions.');
+    return;
+  }
+
   for (const page of pages) {
     try {
       await exportPage(page.id, page.title);

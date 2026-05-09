@@ -9,7 +9,9 @@ I built this because I wanted to export my Notion pages to Markdown, and the oth
    - Go to [Notion integrations](https://www.notion.so/profile/integrations/internal) and click **New connection**.
    - Give it a name (it will be installed into your own `"<Your Name>'s Notion"` workspace) and click **Create**.
    - Open **Configure connection settings**, then under **Installation access token** click **Show** and copy the token.
+
    - Only **read content** permission is required.
+   - In the same page choose **Content access** at the top, click **Edit access**, and enable the page(s) you want to give the integration access to.
 
 2. Copy `.env.example` to `.env` and paste the token you just copied:
 

@@ -16,6 +16,7 @@ function escapeForJs(str) {
 
 function generateHTML(pages) {
   const pageNames = Object.keys(pages);
+  const hasMultiplePages = pageNames.length > 1;
 
   const pagesObjectString = pageNames
     .map(
@@ -53,6 +54,41 @@ function generateHTML(pages) {
       padding: 1em;
       overflow-y: auto;
     }
+    .hamburger {
+      display: none;
+      position: fixed;
+      top: 0.75em;
+      left: 0.75em;
+      z-index: 30;
+      width: 40px;
+      height: 40px;
+      background: #1b1b1b;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      padding: 0;
+      cursor: pointer;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 4px;
+    }
+    .hamburger span {
+      display: block;
+      width: 18px;
+      height: 2px;
+      background: #e4e4e4;
+      border-radius: 1px;
+    }
+    .sidebar-backdrop {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 10;
+    }
     .nav-item {
       display: block;
       padding: 0.5em 0;
@@ -80,9 +116,24 @@ function generateHTML(pages) {
     .content a:hover {
       color: #a5ccff;
     }
+    .content {
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .content p {
+      margin: 0.5em 0;
+    }
     .content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
       color: #ffffff;
+      line-height: 1.25;
+      margin: 0.8em 0 0.3em;
     }
+    .content h1 { font-size: 1.5em; }
+    .content h2 { font-size: 1.25em; }
+    .content h3 { font-size: 1.1em; }
+    .content h4 { font-size: 1em; }
+    .content h5 { font-size: 0.9em; }
+    .content h6 { font-size: 0.85em; color: #b8b8b8; }
     .content code {
       background: #1f1f1f;
       color: #f0c674;
@@ -139,6 +190,47 @@ function generateHTML(pages) {
     .content tr:nth-child(even) td {
       background: #1c1c1c;
     }
+    /* Collapsible heading toggles (Notion-style) */
+    details.toggle {
+      margin: 0.4em 0;
+    }
+    details.toggle > summary {
+      list-style: none;
+      cursor: pointer;
+      display: flex;
+      align-items: baseline;
+      gap: 0.5em;
+      user-select: none;
+    }
+    details.toggle > summary::-webkit-details-marker {
+      display: none;
+    }
+    details.toggle > summary::before {
+      content: "";
+      display: inline-block;
+      width: 0;
+      height: 0;
+      border-left: 5px solid #888;
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+      transition: transform 0.15s ease;
+      flex-shrink: 0;
+      transform: translateY(-2px);
+    }
+    details.toggle[open] > summary::before {
+      transform: translateY(-2px) rotate(90deg);
+    }
+    details.toggle > summary > h1,
+    details.toggle > summary > h2,
+    details.toggle > summary > h3 {
+      margin: 0;
+      display: inline-block;
+    }
+    .toggle-content {
+      margin: 0.3em 0 0.6em 0.4em;
+      padding-left: 0.9em;
+      border-left: 1px solid #2a2a2a;
+    }
     /* Add custom hr style */
     hr.section-divider {
       border: none;
@@ -149,6 +241,28 @@ function generateHTML(pages) {
       opacity: 0.9;
     }
     @media (max-width: 700px) {
+      .hamburger {
+        display: flex;
+      }
+      .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        z-index: 20;
+        width: 250px;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+      }
+      .sidebar.open {
+        transform: translateX(0);
+      }
+      .sidebar-backdrop.open {
+        display: block;
+      }
+      .content {
+        padding-top: 4em;
+      }
       .content table, .content thead, .content tbody, .content th, .content td, .content tr {
         display: block;
         width: 100%;
@@ -180,7 +294,9 @@ function generateHTML(pages) {
   </style>
 </head>
 <body>
+  ${hasMultiplePages ? `<button class="hamburger" id="hamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
   <div class="sidebar" id="sidebar"></div>
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>` : ''}
   <div class="content" id="content"></div>
 
   <script>
@@ -212,18 +328,118 @@ function generateHTML(pages) {
       return null;
     }
 
+    // Group h1/h2/h3 sections into Notion-style collapsible toggles.
+    // Rule: h1 only becomes a toggle when there are multiple h1s. h2 and h3
+    // always become toggles when they have content. Content directly under a
+    // toggle is indented; non-toggle headings stay flat.
+    function makeCollapsible(container, pageKey) {
+      const topChildren = Array.from(container.children);
+      const h1Count = topChildren.filter(e => e.tagName === "H1").length;
+      // Track sibling counters so duplicate headings at the same scope still
+      // get unique storage keys.
+      function process(elements, parentPath) {
+        const result = [];
+        const siblingCounts = {};
+        let i = 0;
+        while (i < elements.length) {
+          const el = elements[i];
+          const m = el.tagName && el.tagName.match(/^H([1-3])$/);
+          if (!m) {
+            result.push(el);
+            i++;
+            continue;
+          }
+          const level = parseInt(m[1]);
+          const headingText = (el.textContent || "").trim();
+          const sibKey = "h" + level + ":" + headingText;
+          siblingCounts[sibKey] = (siblingCounts[sibKey] || 0) + 1;
+          const dedupSuffix = siblingCounts[sibKey] > 1 ? "#" + siblingCounts[sibKey] : "";
+          const myPath = (parentPath ? parentPath + " > " : "") + "h" + level + ":" + headingText + dedupSuffix;
+
+          const children = [];
+          let j = i + 1;
+          while (j < elements.length) {
+            const next = elements[j];
+            const nm = next.tagName && next.tagName.match(/^H([1-6])$/);
+            if (nm && parseInt(nm[1]) <= level) break;
+            children.push(next);
+            j++;
+          }
+          if (children.length && children[0].tagName === "HR" && children[0].classList.contains("section-divider")) {
+            children.shift();
+          }
+
+          if (children.length === 0) {
+            result.push(el);
+          } else {
+            const processedChildren = process(children, myPath);
+            const collapsible = level === 1 ? h1Count > 1 : true;
+            if (collapsible) {
+              const details = document.createElement("details");
+              details.className = "toggle toggle-h" + level;
+              const storageKey = "notion-toggle:" + pageKey + "::" + myPath;
+              let initial = true;
+              try {
+                const stored = localStorage.getItem(storageKey);
+                if (stored === "0") initial = false;
+                else if (stored === "1") initial = true;
+              } catch (e) { /* localStorage unavailable */ }
+              details.open = initial;
+              details.addEventListener("toggle", () => {
+                try {
+                  localStorage.setItem(storageKey, details.open ? "1" : "0");
+                } catch (e) { /* ignore */ }
+              });
+              const summary = document.createElement("summary");
+              summary.appendChild(el);
+              const content = document.createElement("div");
+              content.className = "toggle-content";
+              processedChildren.forEach(c => content.appendChild(c));
+              details.appendChild(summary);
+              details.appendChild(content);
+              result.push(details);
+            } else {
+              result.push(el);
+              processedChildren.forEach(c => result.push(c));
+            }
+          }
+          i = j;
+        }
+        return result;
+      }
+
+      const processed = process(topChildren, "");
+      container.innerHTML = "";
+      processed.forEach(el => container.appendChild(el));
+    }
+
+    function closeMobileSidebar() {
+      const sidebar = document.getElementById("sidebar");
+      const backdrop = document.getElementById("sidebar-backdrop");
+      if (sidebar) sidebar.classList.remove("open");
+      if (backdrop) backdrop.classList.remove("open");
+    }
+
     function loadPage(title) {
       const content = pages[title] || "<p>Page not found.</p>";
-      document.getElementById("content").innerHTML = content;
+      const contentEl = document.getElementById("content");
+      contentEl.innerHTML = content;
+      makeCollapsible(contentEl, title);
+
+      const displayTitle = extractFirstH1(content) || kebabToTitle(title);
+      document.title = displayTitle + " - Markdown Viewer";
 
       // Highlight current
       document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
       const currentNav = document.getElementById("nav-" + title);
       if (currentNav) currentNav.classList.add("active");
+
+      closeMobileSidebar();
     }
 
     function renderSidebar() {
       const sidebar = document.getElementById("sidebar");
+      if (!sidebar) return;
       sidebar.innerHTML = "";
 
       Object.keys(pages).forEach(title => {
@@ -245,6 +461,18 @@ function generateHTML(pages) {
     // On load
     window.onload = () => {
       renderSidebar();
+
+      const hamburger = document.getElementById("hamburger");
+      const sidebar = document.getElementById("sidebar");
+      const backdrop = document.getElementById("sidebar-backdrop");
+      if (hamburger && sidebar && backdrop) {
+        hamburger.addEventListener("click", () => {
+          sidebar.classList.toggle("open");
+          backdrop.classList.toggle("open");
+        });
+        backdrop.addEventListener("click", closeMobileSidebar);
+      }
+
       const firstPage = Object.keys(pages)[0];
       loadPage(firstPage);
     };
