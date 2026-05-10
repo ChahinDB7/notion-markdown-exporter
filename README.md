@@ -44,11 +44,11 @@ Let's you export pages easily to your project in markdown format and also patch 
 
    ```sh
    pnpm patch                                # fully interactive — pick a page (or "Create a new sub-page…") then a .md file then a mode
-   pnpm patch -- 1 tradingbot.md             # non-interactive: page #1, output/tradingbot.md (asks for mode)
-   pnpm patch -- 1 tradingbot.md --smart     # smart-patch (only adjust differences)
-   pnpm patch -- 1 tradingbot.md --fresh     # clear-and-rebuild
-   pnpm patch -- 1 tradingbot.md --dry-run   # parse + preview the block tree, no Notion writes
-   pnpm patch -- --new "My Page" --parent 1 tradingbot.md   # create a new sub-page under page #1
+   pnpm patch -- 1 exampe.md             # non-interactive: page #1, output/exampe.md (asks for mode)
+   pnpm patch -- 1 exampe.md --smart     # smart-patch (only adjust differences)
+   pnpm patch -- 1 exampe.md --fresh     # clear-and-rebuild
+   pnpm patch -- 1 exampe.md --dry-run   # parse + preview the block tree, no Notion writes
+   pnpm patch -- --new "My Page" --parent 1 exampe.md   # create a new sub-page under page #1
    ```
 
    The patcher converts every `#`/`##`/`###` heading into a **toggleable** Notion heading and structurally nests `h2` inside its parent `h1`, `h3` inside its parent `h2`.
