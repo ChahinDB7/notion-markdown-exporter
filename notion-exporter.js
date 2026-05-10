@@ -2,11 +2,10 @@ import { Client } from '@notionhq/client';
 import { NotionToMarkdown } from 'notion-to-md';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as readline from 'readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { multiSelect, promptText, promptConfirm, BACK } from './lib/tui-picker.js';
 
 dotenv.config({ quiet: true });
 
@@ -131,19 +130,11 @@ function pageTreePrefix(page) {
 	return s;
 }
 
-// ---------- multi-select picker (raw-mode keyboard) ----------
+// ---------- descendants for the multi-select cascade ----------
 
-// Toggling a page propagates the new state down to every descendant. Individual
-// children can still be toggled afterwards without touching their parent — the
-// parent's checkbox is just a "set all under me" shortcut.
-async function multiSelectPages(pages, childrenOf) {
-	if (!process.stdin.isTTY) {
-		throw new Error(
-			'Interactive page selection requires a TTY. Run `pnpm start` from a terminal.'
-		);
-	}
-
-	// Recursive descendants: id -> [descendant ids]
+// id -> [descendant ids]; toggling a parent in the picker propagates the
+// new state down to every descendant.
+function buildDescendantsMap(pages, childrenOf) {
 	const descendantsOf = new Map();
 	function gather(id) {
 		if (descendantsOf.has(id)) return descendantsOf.get(id);
@@ -157,135 +148,7 @@ async function multiSelectPages(pages, childrenOf) {
 		return out;
 	}
 	for (const p of pages) gather(p.id);
-
-	let cursor = 0;
-	const checked = new Set();
-	let message = '';
-	let lastLines = 0;
-
-	const CONTINUE_IDX = pages.length;
-	const totalRows = pages.length + 1;
-
-	const renderFrame = () => {
-		let out = '';
-		out += '\nWhich pages should I export?\n';
-		out += '  ↑/↓ move · Space toggle · A toggle all · Enter confirm · Esc/Ctrl-C cancel\n';
-		out += `  Selected: ${checked.size}/${pages.length}\n\n`;
-		for (let i = 0; i < pages.length; i++) {
-			const p = pages[i];
-			const isCursor = i === cursor;
-			const isChecked = checked.has(p.id);
-			const cursorMark = isCursor ? '› ' : '  ';
-			const checkbox = isChecked ? '[x]' : '[ ]';
-			const prefix = pageTreePrefix(p);
-			const icon = p.icon ? `${p.icon} ` : '';
-			const line = `${cursorMark}${checkbox} ${prefix}${icon}${p.title}`;
-			out += isCursor ? `\x1b[7m${line}\x1b[0m\n` : `${line}\n`;
-		}
-		const onContinue = cursor === CONTINUE_IDX;
-		const continueMark = onContinue ? '› ' : '  ';
-		const continueLine = `${continueMark}▶ Continue`;
-		out += '\n';
-		out += onContinue ? `\x1b[7m${continueLine}\x1b[0m\n` : `${continueLine}\n`;
-		if (message) out += `\n${message}\n`;
-		return out;
-	};
-
-	const draw = () => {
-		if (lastLines > 0) process.stdout.write(`\x1b[${lastLines}A\x1b[J`);
-		const frame = renderFrame();
-		process.stdout.write(frame);
-		lastLines = frame.split('\n').length - 1;
-	};
-
-	const toggle = (page) => {
-		const newState = !checked.has(page.id);
-		const apply = (id) => {
-			if (newState) checked.add(id);
-			else checked.delete(id);
-		};
-		apply(page.id);
-		for (const did of descendantsOf.get(page.id) || []) apply(did);
-	};
-
-	const toggleAll = () => {
-		if (checked.size === pages.length) checked.clear();
-		else for (const p of pages) checked.add(p.id);
-	};
-
-	return new Promise((resolve) => {
-		process.stdin.setRawMode(true);
-		process.stdin.resume();
-		process.stdin.setEncoding('utf8');
-
-		const cleanup = () => {
-			process.stdin.setRawMode(false);
-			process.stdin.removeListener('data', onData);
-			process.stdin.pause();
-		};
-
-		const onData = (key) => {
-			if (key === '') {
-				// Ctrl+C — raw mode swallows the signal, so handle exit ourselves.
-				cleanup();
-				process.stdout.write('\nAborted.\n');
-				process.exit(130);
-			}
-			if (key === '') {
-				// bare Esc
-				cleanup();
-				process.stdout.write('\nAborted.\n');
-				process.exit(130);
-			}
-			const tryConfirm = () => {
-				if (checked.size === 0) {
-					message = '⚠️  Select at least one page (Space toggles the highlighted row).';
-					draw();
-					return true;
-				}
-				cleanup();
-				process.stdout.write(`\n✅ ${checked.size} page(s) selected.\n`);
-				resolve(new Set(checked));
-				return true;
-			};
-
-			if (key === '[A' || key === 'k') {
-				cursor = (cursor - 1 + totalRows) % totalRows;
-				message = '';
-			} else if (key === '[B' || key === 'j') {
-				cursor = (cursor + 1) % totalRows;
-				message = '';
-			} else if (key === '[5~') {
-				cursor = Math.max(0, cursor - 10);
-				message = '';
-			} else if (key === '[6~') {
-				cursor = Math.min(totalRows - 1, cursor + 10);
-				message = '';
-			} else if (key === '[H') {
-				cursor = 0;
-				message = '';
-			} else if (key === '[F') {
-				cursor = totalRows - 1;
-				message = '';
-			} else if (key === ' ') {
-				if (cursor === CONTINUE_IDX) {
-					if (tryConfirm()) return;
-				} else {
-					toggle(pages[cursor]);
-					message = '';
-				}
-			} else if (key === 'a' || key === 'A') {
-				toggleAll();
-				message = '';
-			} else if (key === '\r' || key === '\n') {
-				if (tryConfirm()) return;
-			}
-			draw();
-		};
-
-		process.stdin.on('data', onData);
-		draw();
-	});
+	return descendantsOf;
 }
 
 // ---------- folder name validation ----------
@@ -309,20 +172,6 @@ function validateFolderName(name) {
 	if (winReserved.test(name))
 		return `"${name}" is a reserved device name on Windows (CON, PRN, AUX, NUL, COM1-9, LPT1-9).`;
 	return null;
-}
-
-async function promptOutputFolder(rl) {
-	while (true) {
-		const ans = (
-			await rl.question(
-				'\nWhich folder should the .md files go to? (press Enter for "output"): '
-			)
-		).trim();
-		if (ans.length === 0) return 'output';
-		const err = validateFolderName(ans);
-		if (!err) return ans;
-		console.log(`❌ ${err}`);
-	}
 }
 
 // ---------- export ----------
@@ -379,17 +228,57 @@ async function main() {
 		return;
 	}
 
-	const selected = await multiSelectPages(pages, childrenOf);
+	const descendantsOf = buildDescendantsMap(pages, childrenOf);
 
-	const rl = readline.createInterface({ input, output });
-	const outDir = await promptOutputFolder(rl);
+	// ---- interactive flow with Esc-back navigation ----
+	// State machine: pages → output. Esc on `output` returns to `pages`
+	// with the previous selection rehydrated. Esc on `pages` (the first
+	// step) is ignored.
+	let state = 'pages';
+	let selectedIds = null; // Set<id> of pages picked in the multi-select
+	let outDirDraft = ''; // text typed so far for the output folder
+	let outDir = null;
+
+	while (state !== 'done') {
+		if (state === 'pages') {
+			selectedIds = await multiSelect({
+				header: 'Which pages should I export?',
+				items: pages,
+				renderItem: (p) => (p.icon ? `${p.icon} ` : '') + p.title,
+				prefix: pageTreePrefix,
+				keyFn: (p) => p.id,
+				cascadeFn: (p) => (descendantsOf.get(p.id) || []).map((id) => ({ id })),
+				initialChecked: selectedIds || undefined,
+				allowBack: false,
+			});
+			console.log(`✅ ${selectedIds.size} page(s) selected.`);
+			state = 'output';
+			continue;
+		}
+		if (state === 'output') {
+			const result = await promptText({
+				message: 'Which folder should the .md files go to?',
+				defaultValue: 'output',
+				validate: validateFolderName,
+				allowBack: true,
+				initialValue: outDirDraft,
+			});
+			if (result === BACK) {
+				state = 'pages';
+				continue;
+			}
+			outDir = result;
+			outDirDraft = result;
+			state = 'done';
+		}
+	}
 
 	console.log(`\n📁 Output folder: ${outDir}`);
-	console.log(`📤 Exporting ${selected.size} page(s)…\n`);
+	console.log(`📤 Exporting ${selectedIds.size} page(s)…\n`);
 
 	// Walk in tree order so output console messages match the picker order.
 	for (const page of pages) {
-		if (!selected.has(page.id)) continue;
+		if (!selectedIds.has(page.id)) continue;
 		try {
 			await exportPage(page.id, page.title, outDir);
 			await new Promise((r) => setTimeout(r, 2000)); // gentle on the API
@@ -398,11 +287,11 @@ async function main() {
 		}
 	}
 
-	const ans = (await rl.question(
-		`\nAlso generate an HTML viewer from "${outDir}"? (y/yes to continue, anything else to skip): `
-	)).trim().toLowerCase();
-	rl.close();
-	if (ans === 'y' || ans === 'yes') {
+	const wantsHtml = await promptConfirm({
+		message: `Also generate an HTML viewer from "${outDir}"?`,
+		allowBack: false,
+	});
+	if (wantsHtml) {
 		await runGenerateHtml(outDir);
 	}
 }
@@ -424,7 +313,7 @@ function runGenerateHtml(folder) {
 	});
 }
 
-// Handle Ctrl+C cleanly outside raw-mode (e.g. during the readline prompt).
+// Handle Ctrl+C cleanly outside raw-mode (e.g. before the first prompt).
 process.on('SIGINT', () => {
 	if (process.stdout.isTTY) process.stdout.write('\n');
 	console.log('Aborted.');

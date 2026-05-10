@@ -46,9 +46,8 @@ import { Client } from '@notionhq/client';
 import { marked } from 'marked';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as readline from 'readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
 import dotenv from 'dotenv';
+import { singleSelect, promptText, promptConfirm, BACK } from './lib/tui-picker.js';
 
 dotenv.config({ quiet: true });
 
@@ -1016,19 +1015,17 @@ function previewTree(nodes, depth = 0, lines = []) {
 
 // ---------- prompts ----------
 
-// Two-step interactive: ask which folder to scope to (if there's more than one
-// option), then which .md file inside it. Returns { name, path, folder }.
-async function pickMarkdownInteractively(rl, allMd) {
+function renderPage(p) {
+	const icon = p.icon ? `${p.icon} ` : '';
+	return `${icon}${p.title}   (${p.id})`;
+}
+
+// Folder-scope items for the markdown folder picker. "output" first
+// (if present), then every other folder alphabetically, with "Whole project"
+// at the end as a catch-all.
+function buildMdFolderOptions(allMd) {
 	const folders = [...allMd.keys()];
 	const totalFiles = folders.reduce((s, f) => s + allMd.get(f).length, 0);
-
-	// Single folder: skip the folder question entirely.
-	if (folders.length === 1) {
-		return promptMdFile(rl, 'Which markdown file should I push to that page?', allMd);
-	}
-
-	// Build folder options: "output" first (if present), then every other
-	// folder alphabetically, with "Whole project" at the end.
 	const otherFolders = folders.filter((f) => f !== 'output').sort();
 	const opts = [];
 	if (allMd.has('output')) {
@@ -1038,82 +1035,34 @@ async function pickMarkdownInteractively(rl, allMd) {
 		opts.push({ kind: 'folder', folder, count: allMd.get(folder).length });
 	}
 	opts.push({ kind: 'all', count: totalFiles, folderCount: folders.length });
-
-	const pick = await promptChoice(
-		rl,
-		'Where should I look for markdown files?',
-		opts,
-		(o) => {
-			if (o.kind === 'all')
-				return `🌐 Whole project  (${o.count} file${o.count === 1 ? '' : 's'} across ${o.folderCount} folder${o.folderCount === 1 ? '' : 's'})`;
-			const label = o.folder === '.' ? './' : `${o.folder}/`;
-			return `📁 ${label}  (${o.count} file${o.count === 1 ? '' : 's'})`;
-		}
-	);
-
-	if (pick.kind === 'all') {
-		return promptMdFile(rl, 'Which markdown file should I push to that page?', allMd);
-	}
-	return promptMdFile(
-		rl,
-		'Which markdown file should I push to that page?',
-		new Map([[pick.folder, allMd.get(pick.folder)]])
-	);
+	return opts;
 }
 
-async function promptMdFile(rl, label, byFolder) {
-	console.log(`\n${label}`);
-	const flat = flattenMdMap(byFolder);
-	const indexWidth = String(flat.length).length;
-	const folders = [...byFolder.keys()];
-	let idx = 0;
-	if (folders.length === 1) {
-		// Single-folder: render as a flat list
-		for (const name of byFolder.get(folders[0])) {
-			const num = String(idx + 1).padStart(indexWidth, ' ');
-			console.log(`  [${num}] ${name}`);
-			idx++;
-		}
+function renderMdFolderOption(o) {
+	if (o.kind === 'all')
+		return `🌐 Whole project  (${o.count} file${o.count === 1 ? '' : 's'} across ${o.folderCount} folder${o.folderCount === 1 ? '' : 's'})`;
+	const label = o.folder === '.' ? './' : `${o.folder}/`;
+	return `📁 ${label}  (${o.count} file${o.count === 1 ? '' : 's'})`;
+}
+
+// Flat file list for the markdown file picker. folderChoice is one of
+// the items returned by buildMdFolderOptions, or null when there's only
+// one folder in the project (in which case we list every file in it).
+function buildMdFileItems(folderChoice, allMd) {
+	let byFolder;
+	if (!folderChoice || folderChoice.kind === 'all') {
+		byFolder = allMd;
 	} else {
-		// Multi-folder: group with a folder header + tree connectors
-		for (const folder of folders) {
-			const files = byFolder.get(folder);
-			console.log(`  📁 ${folder === '.' ? './' : folder + '/'}`);
-			for (let i = 0; i < files.length; i++) {
-				const isLast = i === files.length - 1;
-				const connector = isLast ? '└── ' : '├── ';
-				const num = String(idx + 1).padStart(indexWidth, ' ');
-				console.log(`     ${connector}[${num}] ${files[i]}`);
-				idx++;
-			}
-		}
+		byFolder = new Map([[folderChoice.folder, allMd.get(folderChoice.folder)]]);
 	}
-	while (true) {
-		const ans = (await rl.question(`Pick a number (1-${flat.length}): `)).trim();
-		const n = parseInt(ans, 10);
-		if (Number.isInteger(n) && n >= 1 && n <= flat.length) return flat[n - 1];
-		console.log('Invalid selection.');
-	}
+	return flattenMdMap(byFolder);
 }
 
-function renderPage(p) {
-	const icon = p.icon ? `${p.icon} ` : '';
-	return `${icon}${p.title}   (${p.id})`;
-}
-
-async function promptChoice(rl, label, items, render, prefix = () => '') {
-	console.log(`\n${label}`);
-	const indexWidth = String(items.length).length;
-	items.forEach((it, i) => {
-		const num = String(i + 1).padStart(indexWidth, ' ');
-		console.log(`  ${prefix(it, i)}[${num}] ${render(it)}`);
-	});
-	while (true) {
-		const ans = (await rl.question(`Pick a number (1-${items.length}): `)).trim();
-		const n = parseInt(ans, 10);
-		if (Number.isInteger(n) && n >= 1 && n <= items.length) return items[n - 1];
-		console.log('Invalid selection.');
-	}
+// Stable identity for the folder choice; used to invalidate file
+// selection when the folder changes via Esc-back.
+function mdFolderKey(choice) {
+	if (!choice) return null;
+	return choice.kind === 'all' ? 'ALL' : choice.folder;
 }
 
 function resolvePageArg(arg, pages) {
@@ -1171,9 +1120,7 @@ async function main() {
 	const newFlag = args.flags['new'];
 	const wantNew = newFlag !== undefined;
 	const parentRef = args.flags['parent'];
-	// Mode: 'smart' (diff-based) or 'fresh' (clear + rebuild).
-	// If neither flag is set we'll ask interactively below (only relevant for existing pages).
-	let mode = args.flags.smart ? 'smart' : args.flags.fresh ? 'fresh' : null;
+	const cliMode = args.flags.smart ? 'smart' : args.flags.fresh ? 'fresh' : null;
 
 	// Early exit: bail before touching the Notion API if there's no markdown to push.
 	const allMd = await findMarkdownFiles('.');
@@ -1188,143 +1135,278 @@ async function main() {
 		process.exit(1);
 	}
 
-	const rl = readline.createInterface({ input, output });
-
-	// ---- pick page (existing or new sub-page) ----
-	// Interactive order: page (or create) -> [parent + title if creating] -> markdown.
 	const CREATE_SENTINEL = { __create: true };
-	let page = null;
-	let createMode = wantNew;
-	let newTitle = typeof newFlag === 'string' ? newFlag : null;
-	let parentPage = null;
-
-	// Pages eligible to be a parent of a new sub-page: only top-level (root)
-	// pages in the accessible set. Hides pages that are themselves sub-pages
-	// of other accessible pages, since those would clutter the picker.
 	const rootPages = pages.filter((p) => p._tree?.depth === 0);
 
-	if (createMode) {
-		if (parentRef) {
-			parentPage = resolvePageArg(parentRef, pages);
-			if (!parentPage) {
-				console.error(`Couldn't resolve --parent "${parentRef}".`);
-				rl.close();
-				process.exit(1);
-			}
-		} else {
-			parentPage = await promptChoice(
-				rl,
-				'Pick a parent page (the new page will be created under it):',
-				rootPages,
-				renderPage
-			);
-		}
-		if (!newTitle) {
-			const ans = (await rl.question('Enter a title for the new sub-page: ')).trim();
-			newTitle = ans || 'Untitled';
-		}
-	} else if (args.positional[0]) {
+	// ---- pre-resolve from CLI args ----
+	// Each *FromCli flag tells the state machine to skip that step entirely.
+	// Steps for inputs supplied via CLI never appear in the back-stack.
+	let page = null;
+	let createMode = wantNew;
+	let parentPage = null;
+	let newTitle = typeof newFlag === 'string' ? newFlag : null;
+	let chosenFolder = null; // result of pick_md_folder
+	let mdFile = null;
+	let mode = cliMode;
+
+	const pageFromCli = !wantNew && !!args.positional[0];
+	const parentFromCli = !!parentRef;
+	const titleFromCli = typeof newFlag === 'string';
+	const mdArg =
+		args.flags.file || (wantNew ? args.positional[0] : args.positional[1]);
+	const mdFromCli = !!mdArg;
+	const modeFromCli = !!cliMode;
+
+	if (pageFromCli) {
 		page = resolvePageArg(args.positional[0], pages);
 		if (!page) {
 			console.error(`Couldn't resolve page "${args.positional[0]}".`);
-			rl.close();
 			process.exit(1);
 		}
-	} else {
-		const choices = [...pages, CREATE_SENTINEL];
-		const picked = await promptChoice(
-			rl,
-			'Which Notion page should I patch?',
-			choices,
-			(c) => (c === CREATE_SENTINEL ? '➕ Create a new sub-page…' : renderPage(c)),
-			(c) => (c === CREATE_SENTINEL ? '' : pageTreePrefix(c))
-		);
-		if (picked === CREATE_SENTINEL) {
-			createMode = true;
-			parentPage = await promptChoice(
-				rl,
-				'Pick a parent page (the new page will be created under it):',
-				rootPages,
-				renderPage
-			);
-			const ans = (await rl.question('Enter a title for the new sub-page: ')).trim();
-			newTitle = ans || 'Untitled';
-		} else {
-			page = picked;
+	}
+	if (createMode && parentFromCli) {
+		parentPage = resolvePageArg(parentRef, pages);
+		if (!parentPage) {
+			console.error(`Couldn't resolve --parent "${parentRef}".`);
+			process.exit(1);
+		}
+	}
+	if (mdFromCli) {
+		mdFile = await resolveMdArg(mdArg, allMd);
+		if (!mdFile) {
+			console.error(`Couldn't resolve markdown file "${mdArg}".`);
+			process.exit(1);
 		}
 	}
 
-	// ---- pick markdown (positional[1] when an existing page was given as
-	// positional[0]; positional[0] when --new was used; else interactive) ----
-	const mdArg =
-		args.flags.file ||
-		(createMode ? args.positional[0] : args.positional[1]);
-	let mdFile = await resolveMdArg(mdArg, allMd);
-	if (!mdFile && mdArg) {
-		console.error(`Couldn't resolve markdown file "${mdArg}".`);
-		rl.close();
-		process.exit(1);
+	// Cursor / draft state for re-entry after Esc-back.
+	let pickPageIndex = 0;
+	let pickParentIndex = 0;
+	let titleDraft = newTitle || '';
+	let pickMdFolderIndex = 0;
+	let pickMdFileIndex = 0;
+	let pickModeIndex = 0;
+
+	// Parse cache so backing in/out of confirm doesn't re-read/parse the file.
+	let parseCache = null; // { path, md, tree, flat, previewLines }
+	let summaryPrinted = false;
+
+	const ensureParse = async () => {
+		if (parseCache && parseCache.path === mdFile.path) return parseCache;
+		const md = await fs.readFile(mdFile.path, 'utf-8');
+		const tokens = marked.lexer(md);
+		const flat = tokensToNodes(tokens);
+		const tree = nestByHeadings(flat);
+		const previewLines = previewTree(tree);
+		parseCache = { path: mdFile.path, md, tree, flat, previewLines };
+		return parseCache;
+	};
+
+	const printSummary = (effectiveMode) => {
+		const summaryHeader = createMode
+			? `Will CREATE a new sub-page "${newTitle}" under "${parentPage.title}" and fill it.`
+			: effectiveMode === 'smart'
+				? `Will SMART-PATCH "${page.title}" (only differences are written).`
+				: `Will REPLACE the contents of "${page.title}".`;
+		console.log(`\n${summaryHeader}`);
+		console.log(`Source file : ${mdFile.path}`);
+		console.log(`Mode        : ${dryRun ? 'DRY RUN (no Notion writes)' : 'LIVE'}`);
+		console.log(`\nParsed ${parseCache.flat.length} blocks → ${parseCache.tree.length} top-level after heading nesting.`);
+		console.log('\nBlock tree preview:');
+		console.log(parseCache.previewLines.slice(0, 50).join('\n'));
+		if (parseCache.previewLines.length > 50) console.log(`  … (+${parseCache.previewLines.length - 50} more)`);
+		summaryPrinted = true;
+	};
+
+	// ---- state machine ----
+	// States: pick_page, pick_parent, enter_title, pick_md_folder,
+	// pick_md_file, pick_mode, confirm. Each step is included only when its
+	// data isn't pre-resolved from CLI args (and its precondition holds —
+	// e.g. pick_parent only applies in create-mode). The very first step
+	// of the run gets allowBack=false (Esc does nothing); every other step
+	// allows Esc to pop back to the previously visited state with prior
+	// inputs preserved (pickXxxIndex / titleDraft).
+	const ORDER = ['pick_page', 'pick_parent', 'enter_title', 'pick_md_folder', 'pick_md_file', 'pick_mode', 'confirm'];
+	const isStateActive = (s) => {
+		switch (s) {
+			case 'pick_page': return !pageFromCli && !createMode;
+			case 'pick_parent': return createMode && !parentFromCli;
+			case 'enter_title': return createMode && !titleFromCli;
+			case 'pick_md_folder': return !mdFromCli && allMd.size > 1;
+			case 'pick_md_file': return !mdFromCli;
+			case 'pick_mode': return !createMode && !modeFromCli;
+			case 'confirm': return !skipConfirm && !dryRun;
+		}
+		return false;
+	};
+	const nextStateAfter = (cur) => {
+		const startIdx = cur === null ? 0 : ORDER.indexOf(cur) + 1;
+		for (let i = startIdx; i < ORDER.length; i++) {
+			if (isStateActive(ORDER[i])) return ORDER[i];
+		}
+		return 'done';
+	};
+
+	let state = nextStateAfter(null);
+	const history = [];
+
+	while (state !== 'done') {
+		const allowBack = history.length > 0;
+
+		if (state === 'pick_page') {
+			const choices = [...pages, CREATE_SENTINEL];
+			const result = await singleSelect({
+				header: 'Which Notion page should I patch?',
+				items: choices,
+				renderItem: (c) => c === CREATE_SENTINEL ? '➕ Create a new sub-page…' : renderPage(c),
+				prefix: (c) => c === CREATE_SENTINEL ? '' : pageTreePrefix(c),
+				allowBack,
+				initialIndex: pickPageIndex,
+			});
+			if (result === BACK) { state = history.pop(); continue; }
+			pickPageIndex = choices.indexOf(result);
+			if (result === CREATE_SENTINEL) {
+				createMode = true;
+				page = null;
+			} else {
+				createMode = false;
+				page = result;
+			}
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		if (state === 'pick_parent') {
+			const result = await singleSelect({
+				header: 'Pick a parent page (the new page will be created under it):',
+				items: rootPages,
+				renderItem: renderPage,
+				allowBack,
+				initialIndex: pickParentIndex,
+			});
+			if (result === BACK) { state = history.pop(); continue; }
+			pickParentIndex = rootPages.indexOf(result);
+			parentPage = result;
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		if (state === 'enter_title') {
+			const result = await promptText({
+				message: 'Enter a title for the new sub-page:',
+				defaultValue: 'Untitled',
+				allowBack,
+				initialValue: titleDraft,
+			});
+			if (result === BACK) { state = history.pop(); continue; }
+			newTitle = result;
+			titleDraft = result;
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		if (state === 'pick_md_folder') {
+			const opts = buildMdFolderOptions(allMd);
+			const result = await singleSelect({
+				header: 'Where should I look for markdown files?',
+				items: opts,
+				renderItem: renderMdFolderOption,
+				allowBack,
+				initialIndex: pickMdFolderIndex,
+			});
+			if (result === BACK) { state = history.pop(); continue; }
+			// Folder change invalidates any previously-picked file: it might
+			// not exist in the new scope.
+			if (mdFolderKey(chosenFolder) !== mdFolderKey(result)) {
+				mdFile = null;
+				pickMdFileIndex = 0;
+			}
+			pickMdFolderIndex = opts.indexOf(result);
+			chosenFolder = result;
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		if (state === 'pick_md_file') {
+			const items = buildMdFileItems(chosenFolder, allMd);
+			const result = await singleSelect({
+				header: 'Which markdown file should I push to that page?',
+				items,
+				renderItem: (f) => f.name,
+				groupHeader: (f, prev) => (!prev || prev.folder !== f.folder)
+					? `📁 ${f.folder === '.' ? './' : f.folder + '/'}`
+					: null,
+				allowBack,
+				initialIndex: pickMdFileIndex,
+			});
+			if (result === BACK) { state = history.pop(); continue; }
+			pickMdFileIndex = items.indexOf(result);
+			mdFile = result;
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		if (state === 'pick_mode') {
+			const MODES = [
+				{ key: 'smart', label: '🧠 Smart — only adjust differences (recommended for small edits)' },
+				{ key: 'fresh', label: '🔄 Fresh — delete everything, then add from scratch (recommended for big rewrites)' },
+			];
+			const result = await singleSelect({
+				header: 'Which patch mode?',
+				items: MODES,
+				renderItem: (m) => m.label,
+				allowBack,
+				initialIndex: pickModeIndex,
+			});
+			if (result === BACK) { state = history.pop(); continue; }
+			pickModeIndex = MODES.indexOf(result);
+			mode = result.key;
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		if (state === 'confirm') {
+			await ensureParse();
+			const effMode = createMode ? 'fresh' : mode;
+			printSummary(effMode);
+			const confirmMessage = createMode
+				? `Create "${newTitle}" under "${parentPage.title}" and fill it from ${mdFile.path}?`
+				: effMode === 'smart'
+					? `Smart-patch "${page.title}" from ${mdFile.path} (only differences will be written)?`
+					: `This will DELETE all current contents of "${page.title}" and replace them.`;
+			const ok = await promptConfirm({
+				message: confirmMessage,
+				allowBack,
+			});
+			if (ok === BACK) { state = history.pop(); continue; }
+			if (!ok) { console.log('Aborted.'); return; }
+			history.push(state);
+			state = nextStateAfter(state);
+			continue;
+		}
+
+		throw new Error(`Unknown state: ${state}`);
 	}
-	if (!mdFile) {
-		mdFile = await pickMarkdownInteractively(rl, allMd);
-	}
 
-	const md = await fs.readFile(mdFile.path, 'utf-8');
+	// createMode never goes through pick_mode — force fresh insert.
+	if (createMode) mode = 'fresh';
 
-	// Pick patch mode for existing pages (createMode skips this — the page is empty)
-	if (!createMode && mode === null) {
-		const MODES = [
-			{ key: 'smart', label: '🧠 Smart — only adjust differences (recommended for small edits)' },
-			{ key: 'fresh', label: '🔄 Fresh — delete everything, then add from scratch (recommended for big rewrites)' },
-		];
-		const picked = await promptChoice(rl, 'Which patch mode?', MODES, (m) => m.label);
-		mode = picked.key;
-	}
-	if (createMode) mode = 'fresh'; // empty new page — fresh insert is the only path
-
-	const summaryHeader = createMode
-		? `Will CREATE a new sub-page "${newTitle}" under "${parentPage.title}" and fill it.`
-		: mode === 'smart'
-			? `Will SMART-PATCH "${page.title}" (only differences are written).`
-			: `Will REPLACE the contents of "${page.title}".`;
-	console.log(`\n${summaryHeader}`);
-	console.log(`Source file : ${mdFile.path}`);
-	console.log(`Mode        : ${dryRun ? 'DRY RUN (no Notion writes)' : 'LIVE'}`);
-
-	const tokens = marked.lexer(md);
-	const flat = tokensToNodes(tokens);
-	const tree = nestByHeadings(flat);
-
-	console.log(`\nParsed ${flat.length} blocks → ${tree.length} top-level after heading nesting.`);
-	const previewLines = previewTree(tree);
-	console.log('\nBlock tree preview:');
-	console.log(previewLines.slice(0, 50).join('\n'));
-	if (previewLines.length > 50) console.log(`  … (+${previewLines.length - 50} more)`);
+	// Make sure parse + summary have happened (e.g. when --yes/--dry-run skipped confirm).
+	await ensureParse();
+	if (!summaryPrinted) printSummary(mode);
 
 	if (dryRun) {
 		console.log('\nDRY RUN: not touching Notion. Done.');
-		rl.close();
 		return;
 	}
 
-	if (!skipConfirm) {
-		let prompt;
-		if (createMode) {
-			prompt = `\nCreate "${newTitle}" under "${parentPage.title}" and fill it from ${mdFile.path}?\nType "yes" (or "y") to continue: `;
-		} else if (mode === 'smart') {
-			prompt = `\nSmart-patch "${page.title}" from ${mdFile.path} (only differences will be written)?\nType "yes" (or "y") to continue: `;
-		} else {
-			prompt = `\nThis will DELETE all current contents of "${page.title}" and replace them.\nType "yes" (or "y") to continue: `;
-		}
-		const ans = (await rl.question(prompt)).trim().toLowerCase();
-		if (ans !== 'yes' && ans !== 'y') {
-			console.log('Aborted.');
-			rl.close();
-			return;
-		}
-	}
-	rl.close();
-
+	const tree = parseCache.tree;
 	const totalNew = countNodes(tree);
 	const t0 = Date.now();
 
@@ -1370,7 +1452,8 @@ function isAbort(e) {
 	return e && (e.code === 'ABORT_ERR' || e.name === 'AbortError' || e.code === 'ERR_USE_AFTER_CLOSE');
 }
 
-// Handle Ctrl+C cleanly even if it fires outside a readline.question() call.
+// Handle Ctrl+C cleanly when it fires before any raw-mode prompt is active.
+// (Inside a prompt, the runner intercepts \x03 directly.)
 process.on('SIGINT', () => {
 	if (process.stdout.isTTY) process.stdout.write('\n');
 	console.log('Aborted.');

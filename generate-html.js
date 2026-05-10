@@ -1,10 +1,9 @@
 import fs from 'fs/promises';
 import path from 'path';
-import readline from 'readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
 import sanitizeHtml from 'sanitize-html';
 import escapeHtml from 'escape-html';
 import { marked } from 'marked';
+import { singleSelect } from './lib/tui-picker.js';
 
 const MD_IGNORE_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', 'out']);
 const MD_IGNORE_FILES = new Set(['README.md']);
@@ -69,25 +68,13 @@ function sortFilesForSidebar(files) {
 async function pickFolder(folders) {
   // Single folder: just use it. No prompt, no extra noise.
   if (folders.length === 1) return folders[0].folder;
-  const rl = readline.createInterface({ input, output });
-  console.log('\nWhich folder of markdown files should I render?');
-  const indexWidth = String(folders.length).length;
-  folders.forEach((f, i) => {
-    const num = String(i + 1).padStart(indexWidth, ' ');
-    console.log(`  [${num}] 📁 ${f.folder}/  (${f.count} file${f.count === 1 ? '' : 's'})`);
+  const picked = await singleSelect({
+    header: 'Which folder of markdown files should I render?',
+    items: folders,
+    renderItem: (f) =>
+      `📁 ${f.folder}/  (${f.count} file${f.count === 1 ? '' : 's'})`,
   });
-  try {
-    while (true) {
-      const ans = (await rl.question(`Pick a number (1-${folders.length}): `)).trim();
-      const n = parseInt(ans, 10);
-      if (Number.isInteger(n) && n >= 1 && n <= folders.length) {
-        return folders[n - 1].folder;
-      }
-      console.log('Invalid selection.');
-    }
-  } finally {
-    rl.close();
-  }
+  return picked.folder;
 }
 
 function escapeForJs(str) {

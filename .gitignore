@@ -5,6 +5,7 @@ node_modules
 *.log
 
 # Files to ignore
+docs
 *-legacy*
 * copy*
 output*/
