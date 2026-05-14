@@ -5,7 +5,7 @@ import * as path from 'path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { multiSelect, promptText, promptConfirm, BACK } from './lib/tui-picker.js';
+import { multiSelect, singleSelect, promptText, promptConfirm, BACK } from './lib/tui-picker.js';
 
 dotenv.config({ quiet: true });
 
@@ -174,6 +174,42 @@ function validateFolderName(name) {
 	return null;
 }
 
+// ---------- existing output folders ----------
+
+// Walk the project for folders that already contain at least one .md file
+// (excluding README.md and common build dirs). The exporter offers these
+// as quick-pick destinations so re-exports drop into the same folder.
+const FOLDER_IGNORE_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', 'out']);
+const FOLDER_IGNORE_FILES = new Set(['README.md']);
+async function findFoldersWithMd(rootDir = '.') {
+	const counts = new Map();
+	async function walk(dir) {
+		let entries;
+		try {
+			entries = await fs.readdir(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		let mdCount = 0;
+		for (const entry of entries) {
+			if (entry.isDirectory()) {
+				if (entry.name.startsWith('.')) continue;
+				if (FOLDER_IGNORE_DIRS.has(entry.name)) continue;
+				await walk(path.join(dir, entry.name));
+			} else if (entry.isFile() && entry.name.endsWith('.md')) {
+				if (FOLDER_IGNORE_FILES.has(entry.name)) continue;
+				mdCount++;
+			}
+		}
+		if (mdCount > 0) {
+			const rel = path.relative(rootDir, dir) || '.';
+			counts.set(rel, mdCount);
+		}
+	}
+	await walk(rootDir);
+	return counts;
+}
+
 // ---------- export ----------
 
 async function exportPage(pageId, title, outDir) {
@@ -229,14 +265,42 @@ async function main() {
 	}
 
 	const descendantsOf = buildDescendantsMap(pages, childrenOf);
+	const existingFolders = await findFoldersWithMd('.');
+
+	// "output" is always offered as the first option, even when the folder
+	// doesn't exist yet — exportPage() creates it on the first write.
+	// "Enter folder name yourself…" sits at slot 2; the rest are folders
+	// that already contain .md files, alphabetical, with "output" and the
+	// project root deduped out.
+	const CUSTOM_SENTINEL = { __custom: true };
+	const buildFolderOptions = () => {
+		const opts = [
+			{ folder: 'output', count: existingFolders.get('output') || 0 },
+			CUSTOM_SENTINEL,
+		];
+		const others = [...existingFolders.keys()]
+			.filter((f) => f !== 'output' && f !== '.')
+			.sort();
+		for (const f of others) {
+			opts.push({ folder: f, count: existingFolders.get(f) });
+		}
+		return opts;
+	};
+	const renderFolderOption = (o) => {
+		if (o === CUSTOM_SENTINEL) return '✏️  Enter folder name yourself…';
+		const label = `${o.folder}/`;
+		if (o.count > 0) return `📁 ${label}  (${o.count} file${o.count === 1 ? '' : 's'})`;
+		return `📁 ${label}  (new — will be created)`;
+	};
 
 	// ---- interactive flow with Esc-back navigation ----
-	// State machine: pages → output. Esc on `output` returns to `pages`
-	// with the previous selection rehydrated. Esc on `pages` (the first
-	// step) is ignored.
+	// State machine: pages → pick_output_folder → [enter_custom_folder] → done.
+	// Esc on a state returns to the previous one with prior input rehydrated.
+	// Esc on the first step (`pages`) is ignored.
 	let state = 'pages';
 	let selectedIds = null; // Set<id> of pages picked in the multi-select
-	let outDirDraft = ''; // text typed so far for the output folder
+	let pickFolderIndex = 0; // cursor position in the folder picker
+	let outDirDraft = ''; // text typed so far in the custom-folder prompt
 	let outDir = null;
 
 	while (state !== 'done') {
@@ -252,19 +316,43 @@ async function main() {
 				allowBack: false,
 			});
 			console.log(`✅ ${selectedIds.size} page(s) selected.`);
-			state = 'output';
+			state = 'pick_output_folder';
 			continue;
 		}
-		if (state === 'output') {
+		if (state === 'pick_output_folder') {
+			const opts = buildFolderOptions();
+			const result = await singleSelect({
+				header: 'Which folder should the .md files go to?',
+				items: opts,
+				renderItem: renderFolderOption,
+				allowBack: true,
+				initialIndex: pickFolderIndex,
+			});
+			if (result === BACK) {
+				state = 'pages';
+				continue;
+			}
+			pickFolderIndex = opts.indexOf(result);
+			if (result === CUSTOM_SENTINEL) {
+				state = 'enter_custom_folder';
+				continue;
+			}
+			outDir = result.folder;
+			state = 'done';
+			continue;
+		}
+		if (state === 'enter_custom_folder') {
 			const result = await promptText({
-				message: 'Which folder should the .md files go to?',
+				message: 'Enter a folder name:',
 				defaultValue: 'output',
 				validate: validateFolderName,
 				allowBack: true,
 				initialValue: outDirDraft,
+				// Matches validateFolderName's 255-char cap (Windows path-component limit).
+				maxLength: 200,
 			});
 			if (result === BACK) {
-				state = 'pages';
+				state = 'pick_output_folder';
 				continue;
 			}
 			outDir = result;

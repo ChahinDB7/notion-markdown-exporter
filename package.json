@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node notion-exporter.js",
     "generate-html": "node generate-html.js",
-    "patch": "node notion-patcher.js"
+    "patch": "node notion-patcher.js",
+    "inspecter": "node notion-inspecter.js"
   },
   "dependencies": {
     "@notionhq/client": "^4.0.1",

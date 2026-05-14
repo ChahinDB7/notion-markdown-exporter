@@ -5,7 +5,9 @@ node_modules
 *.log
 
 # Files to ignore
+crawl
 docs
+*.md
 *-legacy*
 * copy*
 output*/

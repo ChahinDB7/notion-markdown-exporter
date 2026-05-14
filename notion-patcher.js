@@ -787,6 +787,16 @@ function isOpaqueChildContainer(type) {
 	return type === 'table' || type === 'column_list' || type === 'column';
 }
 
+// Notion-managed pointer blocks: subpage links (`child_page`), inline
+// links to other pages (`link_to_page`), and embedded databases
+// (`child_database`). These never appear in source markdown, so the diff
+// would always classify them as "extras to delete" — but deleting a
+// `child_page` block archives the entire subpage. Always leave them alone.
+function isPreservedBlock(block) {
+	const t = block.type;
+	return t === 'child_page' || t === 'child_database' || t === 'link_to_page';
+}
+
 function buildUpdatePayload(existing, newNode) {
 	const t = existing.type;
 	const nData = newNode.block[t] || {};
@@ -795,7 +805,9 @@ function buildUpdatePayload(existing, newNode) {
 
 // Recursively reconcile parentId's children with newNodes. Mutates `tally` in place.
 async function smartPatchChildren(parentId, newNodes, tracker, tally) {
-	const existingBlocks = await fetchChildren(parentId);
+	const existingBlocksAll = await fetchChildren(parentId);
+	const existingBlocks = existingBlocksAll.filter((b) => !isPreservedBlock(b));
+	tally.preserved += existingBlocksAll.length - existingBlocks.length;
 
 	if (existingBlocks.length === 0) {
 		if (newNodes.length > 0) {
@@ -900,18 +912,18 @@ async function smartPatchChildren(parentId, newNodes, tracker, tally) {
 // ---------- delete current page contents ----------
 
 async function clearPage(pageId) {
-	let total = 0;
-	while (true) {
-		const res = await withRetry(() =>
-			notion.blocks.children.list({ block_id: pageId, page_size: 100 })
-		);
-		if (res.results.length === 0) return total;
-		for (const b of res.results) {
-			await withRetry(() => notion.blocks.delete({ block_id: b.id }));
-			total++;
-		}
-		// loop again — a page can have more than 100 children
+	// Fetch every child up-front (paginated), then delete only non-preserved
+	// blocks. A while-true loop that re-fetched after deletes would spin
+	// forever once only preserved blocks remained.
+	const all = await fetchChildren(pageId);
+	let deleted = 0;
+	let preserved = 0;
+	for (const b of all) {
+		if (isPreservedBlock(b)) { preserved++; continue; }
+		await withRetry(() => notion.blocks.delete({ block_id: b.id }));
+		deleted++;
 	}
+	return { deleted, preserved };
 }
 
 // ---------- progress tracker ----------
@@ -1299,6 +1311,9 @@ async function main() {
 				defaultValue: 'Untitled',
 				allowBack,
 				initialValue: titleDraft,
+				// Notion rich_text content is capped at 2000 chars; page titles
+				// share that limit. See MAX_RT_CHUNK above.
+				maxLength: 20,
 			});
 			if (result === BACK) { state = history.pop(); continue; }
 			newTitle = result;
@@ -1426,20 +1441,22 @@ async function main() {
 	if (mode === 'smart') {
 		console.log(`\n🧠 Smart patching "${page.title}" — comparing against ${totalNew} target block(s)…\n`);
 		const tracker = new ProgressTracker(totalNew);
-		const tally = { kept: 0, updated: 0, inserted: 0, deleted: 0 };
+		const tally = { kept: 0, updated: 0, inserted: 0, deleted: 0, preserved: 0 };
 		await smartPatchChildren(page.id, tree, tracker, tally);
 		tracker.finish();
 		const elapsed = Math.round((Date.now() - t0) / 1000);
+		const preservedNote = tally.preserved ? `, ${tally.preserved} preserved (subpage links)` : '';
 		console.log(
-			`✅ Done in ${formatDuration(elapsed)} — ${tally.kept} kept, ${tally.updated} updated, ${tally.inserted} inserted, ${tally.deleted} deleted.`
+			`✅ Done in ${formatDuration(elapsed)} — ${tally.kept} kept, ${tally.updated} updated, ${tally.inserted} inserted, ${tally.deleted} deleted${preservedNote}.`
 		);
 		return;
 	}
 
 	// fresh mode
 	console.log('\n🗑  Clearing page…');
-	const removed = await clearPage(page.id);
-	console.log(`   removed ${removed} top-level block(s).`);
+	const { deleted: removed, preserved } = await clearPage(page.id);
+	const preservedNote = preserved ? `, preserved ${preserved} subpage link(s)` : '';
+	console.log(`   removed ${removed} top-level block(s)${preservedNote}.`);
 	console.log(`📤 Appending ${totalNew} new block(s)…\n`);
 	const tracker = new ProgressTracker(totalNew);
 	await appendChildrenRecursive(page.id, tree, tracker);
